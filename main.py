@@ -14,57 +14,38 @@ def generate_unique_id(existing_ids, length=6):
         if new_id not in existing_ids:
             return new_id
 
-class PolygonType(Enum):
+class UIElementType(Enum):
     TRIGGER = 1
     TOGGLE = 2
     SLIDER = 3
 
-class Polygon(ABC):
-    def __init__(self, points, type):
+class Shape(ABC):
+    def __init__(self, points):
         self.points = points
-        self.type = type
-        self.state = 0
-        self.flash_start = 0
 
     @abstractmethod
-    def draw(self, buffer):
+    def contains_point(self, x, y):
         pass
 
-    def get_brightness(self):
-        base_brightness = 3
-        if self.state:
-            elapsed = time.time() - self.flash_start
-            if elapsed < 0.4:  # Flash for 0.4 seconds
-                flash_brightness = int(15 - (elapsed / 0.1) * 4)  # Flash through 4 brightness levels
-                return max(base_brightness, min(15, flash_brightness))
-            else:
-                return 15 if self.type == PolygonType.TOGGLE else base_brightness
-        else:
-            return base_brightness
+    @abstractmethod
+    def draw(self, buffer, brightness):
+        pass
 
-class Rectangle(Polygon):
-    def draw(self, buffer):
-        brightness = self.get_brightness()
+class Rectangle(Shape):
+    def contains_point(self, x, y):
+        x1, y1 = self.points[0]
+        x2, y2 = self.points[1]
+        return x1 <= x <= x2 and y1 <= y <= y2
+
+    def draw(self, buffer, brightness):
         x1, y1 = self.points[0]
         x2, y2 = self.points[1]
         for x in range(x1, x2 + 1):
             for y in range(y1, y2 + 1):
                 buffer.led_level_set(x, y, brightness)
 
-class Triangle(Polygon):
-    def draw(self, buffer):
-        brightness = self.get_brightness()
-        x1, y1 = self.points[0]
-        x2, y2 = self.points[1]
-        x3, y3 = self.points[2]
-        min_x, max_x = min(x1, x2, x3), max(x1, x2, x3)
-        min_y, max_y = min(y1, y2, y3), max(y1, y2, y3)
-        for x in range(min_x, max_x + 1):
-            for y in range(min_y, max_y + 1):
-                if self.point_inside(x, y):
-                    buffer.led_level_set(x, y, brightness)
-
-    def point_inside(self, x, y):
+class Triangle(Shape):
+    def contains_point(self, x, y):
         def sign(p1, p2, p3):
             return (p1[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[1] - p3[1])
         b1 = sign((x, y), self.points[0], self.points[1]) < 0
@@ -72,107 +53,132 @@ class Triangle(Polygon):
         b3 = sign((x, y), self.points[2], self.points[0]) < 0
         return (b1 == b2) and (b2 == b3)
 
+    def draw(self, buffer, brightness):
+        x1, y1 = self.points[0]
+        x2, y2 = self.points[1]
+        x3, y3 = self.points[2]
+        min_x, max_x = min(x1, x2, x3), max(x1, x2, x3)
+        min_y, max_y = min(y1, y2, y3), max(y1, y2, y3)
+        for x in range(min_x, max_x + 1):
+            for y in range(min_y, max_y + 1):
+                if self.contains_point(x, y):
+                    buffer.led_level_set(x, y, brightness)
+
+class UIElement:
+    def __init__(self, shape, type):
+        self.shape = shape
+        self.type = type
+        self.state = 0
+        self.flash_start = 0
+
+    def contains_point(self, x, y):
+        return self.shape.contains_point(x, y)
+
+    def draw(self, buffer):
+        self.shape.draw(buffer, self.get_brightness())
+
+    def toggle(self):
+        if self.type == UIElementType.TRIGGER:
+            self.state = 1
+        elif self.type == UIElementType.TOGGLE:
+            self.state = 1 - self.state
+        elif self.type == UIElementType.SLIDER:
+            # Implement slider logic here
+            pass
+        self.flash_start = time.time()
+
+    def get_brightness(self):
+        # Init default low level brightness
+        base_brightness = 3
+        brightness = base_brightness
+
+        if self.state:
+            elapsed = time.time() - self.flash_start
+            if elapsed < 0.4:  # Flash for 0.4 seconds
+                flash_brightness = int(15 - (elapsed / 0.1) * 4)  # Flash through 4 brightness levels
+                brightness = max(base_brightness, min(15, flash_brightness))
+            else:
+                return 3 if self.type == UIElementType.TOGGLE else base_brightness
+        return brightness
+
 class GridStudies(monome.GridApp):
     def __init__(self):
         super().__init__()
         self.width = 0
         self.height = 0
+        self.connected = False
         self.reset()
+        self.is_running = False
+        self.update_task = None
 
     def reset(self):
-        self.polygons = {}  # Dictionary to store polygons
+        self.ui_elements = {}
         self.current_points = []
 
     def on_grid_ready(self):
         self.width = self.grid.width
         self.height = self.grid.height
         self.connected = True
+        print(f"Grid connected: {self.width}x{self.height}")
         self.reset()
-        self.draw()
+        self.start_update_loop()
 
     def on_grid_disconnect(self):
         self.connected = False
+        print("Grid disconnected")
+        self.stop_update_loop()
         self.reset()
 
-    def on_grid_key(self, x, y, s):
-        if s == 1:  # Key pressed
-            self.current_points.append((x, y))
-        else:  # Key released
-            if len(self.current_points) == 2:
-                self.create_polygon(self.create_rectangle)
-            elif len(self.current_points) == 3:
-                self.create_polygon(self.create_triangle)
-            else:
-                # Check if the point is inside any polygon
-                for polygon_id, polygon in self.polygons.items():
-                    if self.point_inside_polygon(x, y, polygon.points):
-                        self.toggle_polygon(polygon_id)
-                        break
-            self.current_points = []
-        self.draw()
+    def start_update_loop(self):
+        if not self.is_running:
+            self.is_running = True
+            self.update_task = asyncio.create_task(self.update_loop())
 
-    def create_polygon(self, create_func):
-        new_polygon = create_func()
-        if new_polygon and not self.polygons_overlap(new_polygon):
-            new_id = generate_unique_id(self.polygons.keys())
-            self.polygons[new_id] = new_polygon
+    def stop_update_loop(self):
+        self.is_running = False
+        if self.update_task:
+            self.update_task.cancel()
+
+    async def update_loop(self):
+        while self.is_running:
+            self.draw()
+            await asyncio.sleep(1/30)
+
+    def create_ui_element(self, create_func):
+        new_element = create_func()
+        if new_element and not self.elements_overlap(new_element):
+            new_id = generate_unique_id(self.ui_elements.keys())
+            self.ui_elements[new_id] = new_element
         else:
-            print("Cannot create overlapping polygon")
+            print("Cannot create overlapping UI element")
 
     def create_rectangle(self):
         x1, y1 = self.current_points[0]
         x2, y2 = self.current_points[1]
         points = [(min(x1, x2), min(y1, y2)), (max(x1, x2), max(y1, y2))]
-        return Rectangle(points, PolygonType.TRIGGER)
+        return UIElement(Rectangle(points), UIElementType.TRIGGER)
 
     def create_triangle(self):
-        return Triangle(self.current_points, PolygonType.TRIGGER)
+        return UIElement(Triangle(self.current_points), UIElementType.TOGGLE)
 
-    def toggle_polygon(self, polygon_id):
-        polygon = self.polygons[polygon_id]
-        if polygon.type == PolygonType.TRIGGER:
-            polygon.state = 1
-        elif polygon.type == PolygonType.TOGGLE:
-            polygon.state = 1 - polygon.state
-        polygon.flash_start = time.time()
-
-    def point_inside_polygon(self, x, y, points):
-        if len(points) == 2:  # Rectangle
-            x1, y1 = points[0]
-            x2, y2 = points[1]
-            return x1 <= x <= x2 and y1 <= y <= y2
-        elif len(points) == 3:  # Triangle
-            # Implement point-in-triangle check (e.g., barycentric coordinates)
-            # This is a simplified version and may not work for all cases
-            x1, y1 = points[0]
-            x2, y2 = points[1]
-            x3, y3 = points[2]
-            def sign(p1, p2, p3):
-                return (p1[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[1] - p3[1])
-            b1 = sign((x, y), points[0], points[1]) < 0
-            b2 = sign((x, y), points[1], points[2]) < 0
-            b3 = sign((x, y), points[2], points[0]) < 0
-            return (b1 == b2) and (b2 == b3)
-        return False
-
-    def polygons_overlap(self, new_polygon):
-        for existing_polygon in self.polygons.values():
-            if self.check_overlap(new_polygon, existing_polygon):
+    def elements_overlap(self, new_element):
+        for existing_element in self.ui_elements.values():
+            if self.check_overlap(new_element, existing_element):
                 return True
         return False
 
-    def check_overlap(self, poly1, poly2):
-        # Check if any point of poly1 is inside poly2 or vice versa
-        for point in poly1.points:
-            if self.point_inside_polygon(point[0], point[1], poly2.points):
+    def check_overlap(self, elem1, elem2):
+        # Check if any point of elem1 is inside elem2 or vice versa
+        for point in elem1.shape.points:
+            if elem2.contains_point(point[0], point[1]):
                 return True
-        for point in poly2.points:
-            if self.point_inside_polygon(point[0], point[1], poly1.points):
+        for point in elem2.shape.points:
+            if elem1.contains_point(point[0], point[1]):
                 return True
 
         # Check if any edges intersect
-        edges1 = self.get_edges(poly1.points)
-        edges2 = self.get_edges(poly2.points)
+        edges1 = self.get_edges(elem1.shape.points)
+        edges2 = self.get_edges(elem2.shape.points)
         for edge1 in edges1:
             for edge2 in edges2:
                 if self.lines_intersect(edge1, edge2):
@@ -198,15 +204,32 @@ class GridStudies(monome.GridApp):
         return ccw((x1, y1), (x3, y3), (x4, y4)) != ccw((x2, y2), (x3, y3), (x4, y4)) and \
                ccw((x1, y1), (x2, y2), (x3, y3)) != ccw((x1, y1), (x2, y2), (x4, y4))
 
+    def on_grid_key(self, x, y, s):
+        if s == 1:  # Key pressed
+            self.current_points.append((x, y))
+        else:  # Key released
+            if len(self.current_points) == 2:
+                self.create_ui_element(self.create_rectangle)
+            elif len(self.current_points) == 3:
+                self.create_ui_element(self.create_triangle)
+            else:
+                # Check if the point is inside any UI element
+                for element_id, element in self.ui_elements.items():
+                    if element.contains_point(x, y):
+                        element.toggle()
+                        break
+            self.current_points = []
+        self.draw()
+
     def draw(self):
         if not self.connected:
             return
         
         buffer = monome.GridBuffer(self.width, self.height)
 
-        # Draw polygons
-        for polygon in self.polygons.values():
-            polygon.draw(buffer)
+        # Draw UI elements
+        for element in self.ui_elements.values():
+            element.draw(buffer)
 
         # Draw current selection
         for point in self.current_points:
@@ -215,6 +238,7 @@ class GridStudies(monome.GridApp):
         buffer.render(self.grid)
 
     def cleanup(self):
+        self.stop_update_loop()
         if self.connected:
             buffer = monome.GridBuffer(self.width, self.height)
             buffer.render(self.grid)
