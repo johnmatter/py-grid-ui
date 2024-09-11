@@ -8,6 +8,7 @@ import time
 import random
 import string
 import copy
+from collections import deque
 
 def generate_unique_id(existing_ids, length=6):
     while True:
@@ -122,7 +123,6 @@ class GridStudies(monome.GridApp):
         self.width = 0
         self.height = 0
         self.connected = False
-        self.reset()
         self.is_running = False
         self.update_task = None
         self.meta_pressed = False
@@ -130,14 +130,19 @@ class GridStudies(monome.GridApp):
         self.delete_press_time = 0
         self.delete_press_count = 0
         self.paste_buffer = None
+        self.button_history = deque(maxlen=5)  # Store last 5 button presses
+        self.ui_elements = {}
+        self.current_points = []
+        self.reset()
 
     def reset(self):
-        self.ui_elements = {}  # Dictionary to store UI elements
-        self.current_points = []
+        self.ui_elements.clear()
+        self.current_points.clear()
         self.meta_pressed = False
         self.selected_element = None
         self.delete_press_time = 0
         self.delete_press_count = 0
+        self.button_history.clear()
         # We don't reset paste_buffer here to keep it across resets
 
     def on_grid_ready(self):
@@ -171,11 +176,11 @@ class GridStudies(monome.GridApp):
 
     def create_ui_element(self, create_func):
         new_element = create_func()
-        if new_element and not self.elements_overlap(new_element):
+        if new_element and not self.element_in_bottom_row(new_element) and not self.elements_overlap(new_element):
             new_id = generate_unique_id(self.ui_elements.keys())
             self.ui_elements[new_id] = new_element
         else:
-            print("Cannot create overlapping UI element")
+            print("Cannot create UI element: it would be in the bottom row or overlap with existing elements")
 
     def create_rectangle(self):
         x1, y1 = self.current_points[0]
@@ -248,6 +253,9 @@ class GridStudies(monome.GridApp):
         self.draw()
 
     def handle_normal_interaction(self, x, y, s):
+        if y == self.height - 1:  # Ignore bottom row
+            return
+
         if s == 1:  # Key pressed
             self.current_points.append((x, y))
         else:  # Key released
@@ -265,6 +273,8 @@ class GridStudies(monome.GridApp):
 
     def handle_meta_interaction(self, x, y, s):
         if s == 1:  # Key pressed
+            self.button_history.append((x, y))
+            
             if self.selected_element:
                 meta_ui_pos = self.get_meta_ui_position(self.selected_element)
                 if (x, y) == meta_ui_pos:
@@ -283,18 +293,22 @@ class GridStudies(monome.GridApp):
                     return
 
             # If we didn't press a meta UI button, check for polygon selection or pasting
-            element_at_position = self.get_element_at_position(x, y)
-            if element_at_position:
-                self.selected_element = element_at_position
-                self.delete_press_count = 0  # Reset delete press count when selecting a new element
-            elif self.paste_buffer:
-                self.paste_element(x, y)
-            else:
-                # Create a new Point UIElement
-                new_point = UIElement(Point(x, y), UIElementType.TRIGGER)
-                new_id = generate_unique_id(self.ui_elements.keys())
-                self.ui_elements[new_id] = new_point
-                self.selected_element = new_point
+            if y < self.height - 1:  # Exclude bottom row
+                element_at_position = self.get_element_at_position(x, y)
+                if element_at_position:
+                    self.selected_element = element_at_position
+                    self.delete_press_count = 0  # Reset delete press count when selecting a new element
+                elif self.paste_buffer and self.last_pressed_was_copy_delete():
+                    self.paste_element(x, y)
+                else:
+                    # Create a new Point UIElement
+                    new_point = UIElement(Point(x, y), UIElementType.TRIGGER)
+                    new_id = generate_unique_id(self.ui_elements.keys())
+                    self.ui_elements[new_id] = new_point
+                    self.selected_element = new_point
+
+    def last_pressed_was_copy_delete(self):
+        return len(self.button_history) >= 2 and self.button_history[-2] == (1, self.height - 1)
 
     def copy_selected_element(self):
         if self.selected_element:
@@ -326,14 +340,18 @@ class GridStudies(monome.GridApp):
         # Move the element
         new_element.shape.points = [(p[0] + offset_x, p[1] + offset_y) for p in new_element.shape.points]
 
-        # Check if the new element would overlap with existing elements
-        if not self.elements_overlap(new_element):
-            new_id = generate_unique_id(self.ui_elements.keys())
-            self.ui_elements[new_id] = new_element
-            self.selected_element = new_element
-            print("Element pasted")
-        else:
-            print("Cannot paste: element would overlap with existing elements")
+        # Check if the new element would be in the bottom row or overlap with existing elements
+        if self.element_in_bottom_row(new_element) or self.elements_overlap(new_element):
+            print("Cannot paste: element would be in bottom row or overlap with existing elements")
+            return
+
+        new_id = generate_unique_id(self.ui_elements.keys())
+        self.ui_elements[new_id] = new_element
+        self.selected_element = new_element
+        print("Element pasted")
+
+    def element_in_bottom_row(self, element):
+        return any(point[1] == self.height - 1 for point in element.shape.points)
 
     def get_element_at_position(self, x, y):
         for element in self.ui_elements.values():
