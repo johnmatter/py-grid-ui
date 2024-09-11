@@ -115,12 +115,16 @@ class GridStudies(monome.GridApp):
         self.update_task = None
         self.meta_pressed = False
         self.selected_element = None
+        self.delete_press_time = 0
+        self.delete_press_count = 0
 
     def reset(self):
         self.ui_elements = {}  # Dictionary to store UI elements
         self.current_points = []
         self.meta_pressed = False
         self.selected_element = None
+        self.delete_press_time = 0
+        self.delete_press_count = 0
 
     def on_grid_ready(self):
         self.width = self.grid.width
@@ -239,15 +243,39 @@ class GridStudies(monome.GridApp):
                 elif (x, y) == (meta_ui_pos[0] + 1, meta_ui_pos[1]):
                     self.selected_element.adjust_brightness(-1)
                     return
+                elif (x, y) == (1, self.height - 1):  # Delete button
+                    current_time = time.time()
+                    if current_time - self.delete_press_time < 0.5:  # Double press within 0.5 seconds
+                        self.delete_press_count += 1
+                        if self.delete_press_count == 2:
+                            self.delete_selected_element()
+                            return
+                    else:
+                        self.delete_press_count = 1
+                    self.delete_press_time = current_time
+                    return
 
             # If we didn't press a meta UI button, check for polygon selection
             for element_id, element in self.ui_elements.items():
                 if element.contains_point(x, y):
                     self.selected_element = element
+                    self.delete_press_count = 0  # Reset delete press count when selecting a new element
                     break
         else:  # Key released
             # We don't need to do anything on key release for meta interactions
             pass
+
+    def delete_selected_element(self):
+        if self.selected_element:
+            element_to_delete = None
+            for element_id, element in self.ui_elements.items():
+                if element == self.selected_element:
+                    element_to_delete = element_id
+                    break
+            if element_to_delete:
+                del self.ui_elements[element_to_delete]
+            self.selected_element = None
+            self.delete_press_count = 0
 
     def handle_normal_interaction(self, x, y, s):
         if s == 1:  # Key pressed
@@ -306,6 +334,10 @@ class GridStudies(monome.GridApp):
             meta_ui_pos = self.get_meta_ui_position(self.selected_element)
             buffer.led_level_set(meta_ui_pos[0], meta_ui_pos[1], 15)  # Increment brightness
             buffer.led_level_set(meta_ui_pos[0] + 1, meta_ui_pos[1], 15)  # Decrement brightness
+            
+            # Draw delete button
+            delete_brightness = 15 if self.delete_press_count == 1 else 8
+            buffer.led_level_set(1, self.height - 1, delete_brightness)
 
         buffer.render(self.grid)
 
