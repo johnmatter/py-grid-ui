@@ -231,17 +231,23 @@ class GridStudies(monome.GridApp):
 
     def handle_meta_interaction(self, x, y, s):
         if s == 1:  # Key pressed
+            if self.selected_element:
+                meta_ui_pos = self.get_meta_ui_position(self.selected_element)
+                if (x, y) == meta_ui_pos:
+                    self.selected_element.adjust_brightness(1)
+                    return
+                elif (x, y) == (meta_ui_pos[0] + 1, meta_ui_pos[1]):
+                    self.selected_element.adjust_brightness(-1)
+                    return
+
+            # If we didn't press a meta UI button, check for polygon selection
             for element_id, element in self.ui_elements.items():
                 if element.contains_point(x, y):
                     self.selected_element = element
                     break
         else:  # Key released
-            if self.selected_element:
-                meta_ui_pos = self.get_meta_ui_position(self.selected_element)
-                if (x, y) == meta_ui_pos:
-                    self.selected_element.adjust_brightness(1)
-                elif (x, y) == (meta_ui_pos[0] + 1, meta_ui_pos[1]):
-                    self.selected_element.adjust_brightness(-1)
+            # We don't need to do anything on key release for meta interactions
+            pass
 
     def handle_normal_interaction(self, x, y, s):
         if s == 1:  # Key pressed
