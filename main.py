@@ -70,6 +70,8 @@ class UIElement:
         self.type = type
         self.state = 0
         self.flash_start = 0
+        self.base_brightness = 3
+        self.peak_brightness = 15
 
     def contains_point(self, x, y):
         return self.shape.contains_point(x, y)
@@ -88,18 +90,19 @@ class UIElement:
         self.flash_start = time.time()
 
     def get_brightness(self):
-        # Init default low level brightness
-        base_brightness = 3
-        brightness = base_brightness
-
         if self.state:
             elapsed = time.time() - self.flash_start
-            if elapsed < 0.2:  # Flash for 0.4 seconds
-                flash_brightness = int(9 - (elapsed / 0.2) * 4)  # Flash through 4 brightness levels
-                brightness = max(base_brightness, min(15, flash_brightness))
+            if elapsed < 0.4:  # Flash for 0.4 seconds
+                flash_brightness = int(self.peak_brightness - (elapsed / 0.1) * 4)  # Flash through 4 brightness levels
+                return max(self.base_brightness, min(self.peak_brightness, flash_brightness))
             else:
-                return 3 if self.type == UIElementType.TOGGLE else base_brightness
-        return brightness
+                return self.peak_brightness if self.type == UIElementType.TOGGLE else self.base_brightness
+        else:
+            return self.base_brightness
+
+    def adjust_brightness(self, increment):
+        self.base_brightness = max(1, min(14, self.base_brightness + increment))
+        self.peak_brightness = max(2, min(15, self.peak_brightness + increment))
 
 class GridStudies(monome.GridApp):
     def __init__(self):
@@ -110,10 +113,14 @@ class GridStudies(monome.GridApp):
         self.reset()
         self.is_running = False
         self.update_task = None
+        self.meta_pressed = False
+        self.selected_element = None
 
     def reset(self):
-        self.ui_elements = {}
+        self.ui_elements = {}  # Dictionary to store UI elements
         self.current_points = []
+        self.meta_pressed = False
+        self.selected_element = None
 
     def on_grid_ready(self):
         self.width = self.grid.width
@@ -150,10 +157,7 @@ class GridStudies(monome.GridApp):
             new_id = generate_unique_id(self.ui_elements.keys())
             self.ui_elements[new_id] = new_element
         else:
-            # Remove any UIElements that overlap with the new element
-            overlapping_elements = [id for id, element in self.ui_elements.items() if self.check_overlap(new_element, element)]
-            for id in overlapping_elements:
-                del self.ui_elements[id]
+            print("Cannot create overlapping UI element")
 
     def create_rectangle(self):
         x1, y1 = self.current_points[0]
@@ -171,12 +175,12 @@ class GridStudies(monome.GridApp):
         return False
 
     def check_overlap(self, elem1, elem2):
-        # Check if any point of elem1 is inside or on the edge of elem2 or vice versa
+        # Check if any point of elem1 is inside elem2 or vice versa
         for point in elem1.shape.points:
-            if elem2.contains_point(point[0], point[1]) or self.point_on_edge(point, elem2):
+            if elem2.contains_point(point[0], point[1]):
                 return True
         for point in elem2.shape.points:
-            if elem1.contains_point(point[0], point[1]) or self.point_on_edge(point, elem1):
+            if elem1.contains_point(point[0], point[1]):
                 return True
 
         # Check if any edges intersect
@@ -188,22 +192,6 @@ class GridStudies(monome.GridApp):
                     return True
 
         return False
-
-    def point_on_edge(self, point, elem):
-        edges = self.get_edges(elem.shape.points)
-        for edge in edges:
-            if self.point_on_line(point, edge):
-                return True
-        return False
-
-    def point_on_line(self, point, line):
-        x, y = point
-        x1, y1 = line[0]
-        x2, y2 = line[1]
-        # Check if the point is on the line segment
-        return (min(x1, x2) <= x <= max(x1, x2) and
-                min(y1, y2) <= y <= max(y1, y2) and
-                ((y - y1) * (x2 - x1) == (y2 - y1) * (x - x1)))
 
     def get_edges(self, points):
         edges = []
@@ -224,6 +212,38 @@ class GridStudies(monome.GridApp):
                ccw((x1, y1), (x2, y2), (x3, y3)) != ccw((x1, y1), (x2, y2), (x4, y4))
 
     def on_grid_key(self, x, y, s):
+        if not self.connected:
+            return
+
+        if x == 0 and y == self.height - 1:  # Meta key
+            self.meta_pressed = (s == 1)
+            if not self.meta_pressed:
+                self.selected_element = None
+            self.draw()
+            return
+
+        if self.meta_pressed:
+            self.handle_meta_interaction(x, y, s)
+        else:
+            self.handle_normal_interaction(x, y, s)
+
+        self.draw()
+
+    def handle_meta_interaction(self, x, y, s):
+        if s == 1:  # Key pressed
+            for element_id, element in self.ui_elements.items():
+                if element.contains_point(x, y):
+                    self.selected_element = element
+                    break
+        else:  # Key released
+            if self.selected_element:
+                meta_ui_pos = self.get_meta_ui_position(self.selected_element)
+                if (x, y) == meta_ui_pos:
+                    self.selected_element.adjust_brightness(1)
+                elif (x, y) == (meta_ui_pos[0] + 1, meta_ui_pos[1]):
+                    self.selected_element.adjust_brightness(-1)
+
+    def handle_normal_interaction(self, x, y, s):
         if s == 1:  # Key pressed
             self.current_points.append((x, y))
         else:  # Key released
@@ -238,7 +258,25 @@ class GridStudies(monome.GridApp):
                         element.toggle()
                         break
             self.current_points = []
-        self.draw()
+
+    def get_meta_ui_position(self, element):
+        # Find the rightmost point of the element
+        max_x = max(point[0] for point in element.shape.points)
+        min_y = min(point[1] for point in element.shape.points)
+
+        # Position the meta UI to the right of the element
+        meta_x = max_x + 1
+        meta_y = min_y
+
+        # If the meta UI would be off the grid, move it left
+        if meta_x >= self.width - 1:
+            meta_x = max_x - 2
+
+        # Ensure the meta UI is fully on the grid
+        meta_x = max(0, min(self.width - 2, meta_x))
+        meta_y = max(0, min(self.height - 1, meta_y))
+
+        return (meta_x, meta_y)
 
     def draw(self):
         if not self.connected:
@@ -253,6 +291,15 @@ class GridStudies(monome.GridApp):
         # Draw current selection
         for point in self.current_points:
             buffer.led_level_set(point[0], point[1], 15)
+
+        # Draw meta key
+        buffer.led_level_set(0, self.height - 1, 15 if self.meta_pressed else 5)
+
+        # Draw meta UI if an element is selected
+        if self.meta_pressed and self.selected_element:
+            meta_ui_pos = self.get_meta_ui_position(self.selected_element)
+            buffer.led_level_set(meta_ui_pos[0], meta_ui_pos[1], 15)  # Increment brightness
+            buffer.led_level_set(meta_ui_pos[0] + 1, meta_ui_pos[1], 15)  # Decrement brightness
 
         buffer.render(self.grid)
 
