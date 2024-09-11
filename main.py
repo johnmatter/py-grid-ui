@@ -7,6 +7,7 @@ from enum import Enum
 import time
 import random
 import string
+import copy
 
 def generate_unique_id(existing_ids, length=6):
     while True:
@@ -25,6 +26,17 @@ class Shape(ABC):
     @abstractmethod
     def draw(self, buffer, brightness):
         pass
+
+class Point(Shape):
+    def __init__(self, x, y):
+        super().__init__([(x, y)])
+
+    def contains_point(self, x, y):
+        return (x, y) == self.points[0]
+
+    def draw(self, buffer, brightness):
+        x, y = self.points[0]
+        buffer.led_level_set(x, y, brightness)
 
 class Rectangle(Shape):
     def contains_point(self, x, y):
@@ -117,6 +129,7 @@ class GridStudies(monome.GridApp):
         self.selected_element = None
         self.delete_press_time = 0
         self.delete_press_count = 0
+        self.paste_buffer = None
 
     def reset(self):
         self.ui_elements = {}  # Dictionary to store UI elements
@@ -125,6 +138,7 @@ class GridStudies(monome.GridApp):
         self.selected_element = None
         self.delete_press_time = 0
         self.delete_press_count = 0
+        # We don't reset paste_buffer here to keep it across resets
 
     def on_grid_ready(self):
         self.width = self.grid.width
@@ -233,50 +247,6 @@ class GridStudies(monome.GridApp):
 
         self.draw()
 
-    def handle_meta_interaction(self, x, y, s):
-        if s == 1:  # Key pressed
-            if self.selected_element:
-                meta_ui_pos = self.get_meta_ui_position(self.selected_element)
-                if (x, y) == meta_ui_pos:
-                    self.selected_element.adjust_brightness(1)
-                    return
-                elif (x, y) == (meta_ui_pos[0] + 1, meta_ui_pos[1]):
-                    self.selected_element.adjust_brightness(-1)
-                    return
-                elif (x, y) == (1, self.height - 1):  # Delete button
-                    current_time = time.time()
-                    if current_time - self.delete_press_time < 0.5:  # Double press within 0.5 seconds
-                        self.delete_press_count += 1
-                        if self.delete_press_count == 2:
-                            self.delete_selected_element()
-                            return
-                    else:
-                        self.delete_press_count = 1
-                    self.delete_press_time = current_time
-                    return
-
-            # If we didn't press a meta UI button, check for polygon selection
-            for element_id, element in self.ui_elements.items():
-                if element.contains_point(x, y):
-                    self.selected_element = element
-                    self.delete_press_count = 0  # Reset delete press count when selecting a new element
-                    break
-        else:  # Key released
-            # We don't need to do anything on key release for meta interactions
-            pass
-
-    def delete_selected_element(self):
-        if self.selected_element:
-            element_to_delete = None
-            for element_id, element in self.ui_elements.items():
-                if element == self.selected_element:
-                    element_to_delete = element_id
-                    break
-            if element_to_delete:
-                del self.ui_elements[element_to_delete]
-            self.selected_element = None
-            self.delete_press_count = 0
-
     def handle_normal_interaction(self, x, y, s):
         if s == 1:  # Key pressed
             self.current_points.append((x, y))
@@ -292,6 +262,84 @@ class GridStudies(monome.GridApp):
                         element.toggle()
                         break
             self.current_points = []
+
+    def handle_meta_interaction(self, x, y, s):
+        if s == 1:  # Key pressed
+            if self.selected_element:
+                meta_ui_pos = self.get_meta_ui_position(self.selected_element)
+                if (x, y) == meta_ui_pos:
+                    self.selected_element.adjust_brightness(1)
+                    return
+                elif (x, y) == (meta_ui_pos[0] + 1, meta_ui_pos[1]):
+                    self.selected_element.adjust_brightness(-1)
+                    return
+                elif (x, y) == (1, self.height - 1):  # Copy/Delete button
+                    current_time = time.time()
+                    if current_time - self.delete_press_time < 0.5:  # Double press within 0.5 seconds
+                        self.delete_selected_element()
+                    else:
+                        self.copy_selected_element()
+                    self.delete_press_time = current_time
+                    return
+
+            # If we didn't press a meta UI button, check for polygon selection or pasting
+            element_at_position = self.get_element_at_position(x, y)
+            if element_at_position:
+                self.selected_element = element_at_position
+                self.delete_press_count = 0  # Reset delete press count when selecting a new element
+            elif self.paste_buffer:
+                self.paste_element(x, y)
+            else:
+                # Create a new Point UIElement
+                new_point = UIElement(Point(x, y), UIElementType.TRIGGER)
+                new_id = generate_unique_id(self.ui_elements.keys())
+                self.ui_elements[new_id] = new_point
+                self.selected_element = new_point
+
+    def copy_selected_element(self):
+        if self.selected_element:
+            self.paste_buffer = copy.deepcopy(self.selected_element)
+            print("Element copied to paste buffer")
+
+    def delete_selected_element(self):
+        if self.selected_element:
+            element_to_delete = None
+            for element_id, element in self.ui_elements.items():
+                if element == self.selected_element:
+                    element_to_delete = element_id
+                    break
+            if element_to_delete:
+                del self.ui_elements[element_to_delete]
+            self.selected_element = None
+            print("Element deleted")
+
+    def paste_element(self, x, y):
+        if not self.paste_buffer:
+            return
+
+        new_element = copy.deepcopy(self.paste_buffer)
+        
+        # Calculate the offset to move the element
+        old_x, old_y = new_element.shape.points[0]
+        offset_x, offset_y = x - old_x, y - old_y
+
+        # Move the element
+        new_element.shape.points = [(p[0] + offset_x, p[1] + offset_y) for p in new_element.shape.points]
+
+        # Check if the new element would overlap with existing elements
+        if not self.elements_overlap(new_element):
+            new_id = generate_unique_id(self.ui_elements.keys())
+            self.ui_elements[new_id] = new_element
+            self.selected_element = new_element
+            print("Element pasted")
+        else:
+            print("Cannot paste: element would overlap with existing elements")
+
+    def get_element_at_position(self, x, y):
+        for element in self.ui_elements.values():
+            if element.contains_point(x, y):
+                return element
+        return None
 
     def get_meta_ui_position(self, element):
         # Find the rightmost point of the element
@@ -335,9 +383,9 @@ class GridStudies(monome.GridApp):
             buffer.led_level_set(meta_ui_pos[0], meta_ui_pos[1], 15)  # Increment brightness
             buffer.led_level_set(meta_ui_pos[0] + 1, meta_ui_pos[1], 15)  # Decrement brightness
             
-            # Draw delete button
-            delete_brightness = 15 if self.delete_press_count == 1 else 8
-            buffer.led_level_set(1, self.height - 1, delete_brightness)
+            # Draw copy/delete button
+            copy_delete_brightness = 15 if self.paste_buffer else 8
+            buffer.led_level_set(1, self.height - 1, copy_delete_brightness)
 
         buffer.render(self.grid)
 
