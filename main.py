@@ -54,6 +54,8 @@ class Rectangle(Shape):
 
 class Triangle(Shape):
     def contains_point(self, x, y):
+        if len(self.points) < 3:
+            return False
         def sign(p1, p2, p3):
             return (p1[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[1] - p3[1])
         b1 = sign((x, y), self.points[0], self.points[1]) < 0
@@ -62,6 +64,9 @@ class Triangle(Shape):
         return (b1 == b2) and (b2 == b3)
 
     def draw(self, buffer, brightness):
+        if len(self.points) < 3:
+            print(f"Warning: Triangle has insufficient points: {self.points}")
+            return
         x1, y1 = self.points[0]
         x2, y2 = self.points[1]
         x3, y3 = self.points[2]
@@ -152,33 +157,114 @@ class GridStudies(monome.GridApp):
         print(f"Grid connected: {self.width}x{self.height}")
         self.reset()
         self.start_update_loop()
-
-    def on_grid_disconnect(self):
-        self.connected = False
-        print("Grid disconnected")
-        self.stop_update_loop()
-        self.reset()
+        self.draw()
 
     def start_update_loop(self):
         if not self.is_running:
             self.is_running = True
             self.update_task = asyncio.create_task(self.update_loop())
 
+    async def update_loop(self):
+        while self.is_running:
+            self.draw()
+            await asyncio.sleep(0.1)  # Update every 100ms
+
     def stop_update_loop(self):
         self.is_running = False
         if self.update_task:
             self.update_task.cancel()
 
-    async def update_loop(self):
-        while self.is_running:
-            self.draw()
-            await asyncio.sleep(1/30)
+    def cleanup(self):
+        self.stop_update_loop()
+        if self.connected:
+            buffer = monome.GridBuffer(self.width, self.height)
+            buffer.render(self.grid)
+        print("\nCleaning up and exiting...")
 
-    def create_ui_element(self, create_func):
-        new_element = create_func()
+    def on_grid_key(self, x, y, s):
+        if not self.connected:
+            return
+
+        if x == 0 and y == self.height - 1:  # Meta key
+            self.meta_pressed = (s == 1)
+            if not self.meta_pressed:
+                self.create_ui_element()
+                self.selected_element = None
+                self.current_points.clear()
+            self.draw()
+            return
+
+        if self.meta_pressed:
+            self.handle_meta_interaction(x, y, s)
+        else:
+            self.handle_normal_interaction(x, y, s)
+
+        self.draw()
+
+    def handle_normal_interaction(self, x, y, s):
+        if y == self.height - 1:  # Ignore bottom row
+            return
+
+        if s == 1:  # Key pressed
+            # Check if the point is inside any UI element
+            for element_id, element in self.ui_elements.items():
+                if element.contains_point(x, y):
+                    element.toggle()
+                    break
+
+    def handle_meta_interaction(self, x, y, s):
+        if s == 1:  # Key pressed
+            self.button_history.append((x, y))
+            print(f"Meta interaction: x={x}, y={y}")
+            
+            # Exclude bottom row for UI element creation
+            if y < self.height - 1:
+                if (x, y) not in self.current_points:
+                    self.current_points.append((x, y))
+                    print(f"Added point: {(x, y)}. Current points: {self.current_points}")
+            
+            # If an element has been selected
+            if self.selected_element:
+                meta_ui_pos = self.get_meta_ui_position(self.selected_element)
+                if (x, y) == meta_ui_pos:
+                    self.selected_element.adjust_brightness(1)
+                    return
+                elif (x, y) == (meta_ui_pos[0] + 1, meta_ui_pos[1]):
+                    self.selected_element.adjust_brightness(-1)
+                    return
+                elif (x, y) == (1, self.height - 1):  # Copy/Delete button
+                    current_time = time.time()
+                    if current_time - self.delete_press_time < 0.5:  # Double press within 0.5 seconds
+                        self.delete_selected_element()
+                    else:
+                        self.copy_selected_element()
+                    self.delete_press_time = current_time
+                    return
+
+            # If we didn't press a meta UI button, check for polygon selection or pasting
+            if y < self.height - 1:  # Exclude bottom row
+                element_at_position = self.get_element_at_position(x, y)
+                if element_at_position:
+                    self.selected_element = element_at_position
+                    self.delete_press_count = 0  # Reset delete press count when selecting a new element
+                elif self.paste_buffer and self.last_pressed_was_copy_delete():
+                    self.paste_element(x, y)
+
+    def create_ui_element(self):
+        if len(self.current_points) == 2:
+            new_element = self.create_rectangle()
+        elif len(self.current_points) == 3:
+            new_element = self.create_triangle()
+        elif len(self.current_points) == 1:
+            new_element = self.create_point()
+        else:
+            print(f"Warning: Invalid number of points for UI element creation: {len(self.current_points)}")
+            return
+
         if new_element and not self.element_in_bottom_row(new_element) and not self.elements_overlap(new_element):
             new_id = generate_unique_id(self.ui_elements.keys())
             self.ui_elements[new_id] = new_element
+            print(f"Created new {type(new_element.shape).__name__}")
         else:
             print("Cannot create UI element: it would be in the bottom row or overlap with existing elements")
 
@@ -189,7 +275,14 @@ class GridStudies(monome.GridApp):
         return UIElement(Rectangle(points), UIElementType.TRIGGER)
 
     def create_triangle(self):
+        if len(self.current_points) < 3:
+            print(f"Warning: Not enough points to create a triangle. Points: {self.current_points}")
+            return None
         return UIElement(Triangle(self.current_points), UIElementType.TOGGLE)
+
+    def create_point(self):
+        x, y = self.current_points[0]
+        return UIElement(Point(x, y), UIElementType.TRIGGER)
 
     def elements_overlap(self, new_element):
         for existing_element in self.ui_elements.values():
@@ -233,79 +326,6 @@ class GridStudies(monome.GridApp):
 
         return ccw((x1, y1), (x3, y3), (x4, y4)) != ccw((x2, y2), (x3, y3), (x4, y4)) and \
                ccw((x1, y1), (x2, y2), (x3, y3)) != ccw((x1, y1), (x2, y2), (x4, y4))
-
-    def on_grid_key(self, x, y, s):
-        if not self.connected:
-            return
-
-        if x == 0 and y == self.height - 1:  # Meta key
-            self.meta_pressed = (s == 1)
-            if not self.meta_pressed:
-                self.selected_element = None
-            self.draw()
-            return
-
-        if self.meta_pressed:
-            self.handle_meta_interaction(x, y, s)
-        else:
-            self.handle_normal_interaction(x, y, s)
-
-        self.draw()
-
-    def handle_normal_interaction(self, x, y, s):
-        if y == self.height - 1:  # Ignore bottom row
-            return
-
-        if s == 1:  # Key pressed
-            self.current_points.append((x, y))
-        else:  # Key released
-            if len(self.current_points) == 2:
-                self.create_ui_element(self.create_rectangle)
-            elif len(self.current_points) == 3:
-                self.create_ui_element(self.create_triangle)
-            else:
-                # Check if the point is inside any UI element
-                for element_id, element in self.ui_elements.items():
-                    if element.contains_point(x, y):
-                        element.toggle()
-                        break
-            self.current_points = []
-
-    def handle_meta_interaction(self, x, y, s):
-        if s == 1:  # Key pressed
-            self.button_history.append((x, y))
-            
-            if self.selected_element:
-                meta_ui_pos = self.get_meta_ui_position(self.selected_element)
-                if (x, y) == meta_ui_pos:
-                    self.selected_element.adjust_brightness(1)
-                    return
-                elif (x, y) == (meta_ui_pos[0] + 1, meta_ui_pos[1]):
-                    self.selected_element.adjust_brightness(-1)
-                    return
-                elif (x, y) == (1, self.height - 1):  # Copy/Delete button
-                    current_time = time.time()
-                    if current_time - self.delete_press_time < 0.5:  # Double press within 0.5 seconds
-                        self.delete_selected_element()
-                    else:
-                        self.copy_selected_element()
-                    self.delete_press_time = current_time
-                    return
-
-            # If we didn't press a meta UI button, check for polygon selection or pasting
-            if y < self.height - 1:  # Exclude bottom row
-                element_at_position = self.get_element_at_position(x, y)
-                if element_at_position:
-                    self.selected_element = element_at_position
-                    self.delete_press_count = 0  # Reset delete press count when selecting a new element
-                elif self.paste_buffer and self.last_pressed_was_copy_delete():
-                    self.paste_element(x, y)
-                else:
-                    # Create a new Point UIElement
-                    new_point = UIElement(Point(x, y), UIElementType.TRIGGER)
-                    new_id = generate_unique_id(self.ui_elements.keys())
-                    self.ui_elements[new_id] = new_point
-                    self.selected_element = new_point
 
     def last_pressed_was_copy_delete(self):
         return len(self.button_history) >= 2 and self.button_history[-2] == (1, self.height - 1)
@@ -390,7 +410,7 @@ class GridStudies(monome.GridApp):
 
         # Draw current selection
         for point in self.current_points:
-            buffer.led_level_set(point[0], point[1], 15)
+            buffer.led_level_set(point[0], point[1], 1)
 
         # Draw meta key
         buffer.led_level_set(0, self.height - 1, 15 if self.meta_pressed else 5)
@@ -406,13 +426,6 @@ class GridStudies(monome.GridApp):
             buffer.led_level_set(1, self.height - 1, copy_delete_brightness)
 
         buffer.render(self.grid)
-
-    def cleanup(self):
-        self.stop_update_loop()
-        if self.connected:
-            buffer = monome.GridBuffer(self.width, self.height)
-            buffer.render(self.grid)
-        print("\nCleaning up and exiting...")
 
 """
 Main asynchronous function to set up and run the application.
