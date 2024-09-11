@@ -14,11 +14,6 @@ def generate_unique_id(existing_ids, length=6):
         if new_id not in existing_ids:
             return new_id
 
-class UIElementType(Enum):
-    TRIGGER = 1
-    TOGGLE = 2
-    SLIDER = 3
-
 class Shape(ABC):
     def __init__(self, points):
         self.points = points
@@ -64,6 +59,11 @@ class Triangle(Shape):
                 if self.contains_point(x, y):
                     buffer.led_level_set(x, y, brightness)
 
+class UIElementType(Enum):
+    TRIGGER = 1
+    TOGGLE = 2
+    SLIDER = 3
+
 class UIElement:
     def __init__(self, shape, type):
         self.shape = shape
@@ -94,8 +94,8 @@ class UIElement:
 
         if self.state:
             elapsed = time.time() - self.flash_start
-            if elapsed < 0.4:  # Flash for 0.4 seconds
-                flash_brightness = int(15 - (elapsed / 0.1) * 4)  # Flash through 4 brightness levels
+            if elapsed < 0.2:  # Flash for 0.4 seconds
+                flash_brightness = int(9 - (elapsed / 0.2) * 4)  # Flash through 4 brightness levels
                 brightness = max(base_brightness, min(15, flash_brightness))
             else:
                 return 3 if self.type == UIElementType.TOGGLE else base_brightness
@@ -150,7 +150,10 @@ class GridStudies(monome.GridApp):
             new_id = generate_unique_id(self.ui_elements.keys())
             self.ui_elements[new_id] = new_element
         else:
-            print("Cannot create overlapping UI element")
+            # Remove any UIElements that overlap with the new element
+            overlapping_elements = [id for id, element in self.ui_elements.items() if self.check_overlap(new_element, element)]
+            for id in overlapping_elements:
+                del self.ui_elements[id]
 
     def create_rectangle(self):
         x1, y1 = self.current_points[0]
@@ -168,12 +171,12 @@ class GridStudies(monome.GridApp):
         return False
 
     def check_overlap(self, elem1, elem2):
-        # Check if any point of elem1 is inside elem2 or vice versa
+        # Check if any point of elem1 is inside or on the edge of elem2 or vice versa
         for point in elem1.shape.points:
-            if elem2.contains_point(point[0], point[1]):
+            if elem2.contains_point(point[0], point[1]) or self.point_on_edge(point, elem2):
                 return True
         for point in elem2.shape.points:
-            if elem1.contains_point(point[0], point[1]):
+            if elem1.contains_point(point[0], point[1]) or self.point_on_edge(point, elem1):
                 return True
 
         # Check if any edges intersect
@@ -185,6 +188,22 @@ class GridStudies(monome.GridApp):
                     return True
 
         return False
+
+    def point_on_edge(self, point, elem):
+        edges = self.get_edges(elem.shape.points)
+        for edge in edges:
+            if self.point_on_line(point, edge):
+                return True
+        return False
+
+    def point_on_line(self, point, line):
+        x, y = point
+        x1, y1 = line[0]
+        x2, y2 = line[1]
+        # Check if the point is on the line segment
+        return (min(x1, x2) <= x <= max(x1, x2) and
+                min(y1, y2) <= y <= max(y1, y2) and
+                ((y - y1) * (x2 - x1) == (y2 - y1) * (x - x1)))
 
     def get_edges(self, points):
         edges = []
