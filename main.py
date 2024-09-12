@@ -106,7 +106,7 @@ class UIElement:
         self.state = 0
         self.flash_start = 0
         self.base_brightness = 3
-        self.peak_brightness = 10
+        self.peak_brightness = 5
 
     def contains_point(self, x, y):
         return self.shape.contains_point(x, y)
@@ -119,8 +119,8 @@ class UIElement:
         return self.base_brightness if self.state == 0 else self.peak_brightness
 
     def clip_brightness(self):
-        self.base_brightness = max(0, min(self.base_brightness, 13))
-        self.peak_brightness = max(2, min(self.peak_brightness, 15))
+        self.base_brightness = max(1, min(self.base_brightness, 13))
+        self.peak_brightness = max(3, min(self.peak_brightness, 15))
 
     def adjust_brightness(self, delta):
         self.base_brightness += delta
@@ -131,18 +131,18 @@ class UIElement:
         raise NotImplementedError("Subclasses should implement this!")
 
 class Toggle(UIElement):
-    # def get_brightness(self):
-    #     elapsed = time.time() - self.flash_start
-    #     if self.state:  # If the toggle is on
-    #         if elapsed < 0.5:  # Growing phase
-    #             return int(self.base_brightness + (self.peak_brightness - self.base_brightness) * (elapsed / 0.5))
-    #         else:
-    #             return self.peak_brightness  # Max brightness after growing
-    #     else:  # If the toggle is off
-    #         if elapsed < 0.5:  # Fading out phase
-    #             return int(self.peak_brightness * (1 - (elapsed / 0.5)))
-    #         else:
-    #             return self.base_brightness  # Return to base brightness when fully faded out
+    def get_brightness(self):
+        elapsed = time.time() - self.flash_start
+        if self.state:  # If the toggle is on
+            if elapsed < 0.5:  # Growing phase
+                return int(self.base_brightness + (self.peak_brightness - self.base_brightness) * (elapsed / 0.5))
+            else:
+                return self.peak_brightness  # Max brightness after growing
+        else:  # If the toggle is off
+            if elapsed < 0.5:  # Fading out phase
+                return int(self.peak_brightness * (1 - (elapsed / 0.5)))
+            else:
+                return self.base_brightness  # Return to base brightness when fully faded out
 
     def touch(self, x, y, s):
         super().touch(x,y,s)
@@ -297,6 +297,7 @@ class GridUI(monome.GridApp):
                     current_time = time.time()
                     if current_time - self.delete_press_time < 0.5:  # Double press within 0.5 seconds
                         self.delete_selected_element()
+                        self.current_points.clear()
                         return
                     else:
                         self.copy_selected_element()
@@ -470,7 +471,7 @@ class GridUI(monome.GridApp):
             buffer.led_level_set(point[0], point[1], 15)
 
         # Draw meta key
-        buffer.led_level_set(0, self.height - 1, 15 if self.meta_pressed else 5)
+        buffer.led_level_set(0, self.height - 1, 8 if self.meta_pressed else 1)
 
         # Draw meta UI if an element is selected
         if self.meta_pressed and self.selected_element:
