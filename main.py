@@ -183,7 +183,7 @@ class Slider(UIElement):
  .-. :              
  `._.'
 """
-class GridStudies(monome.GridApp):
+class GridUI(monome.GridApp):
     def __init__(self):
         super().__init__()
         self.width = 0
@@ -297,6 +297,7 @@ class GridStudies(monome.GridApp):
                     current_time = time.time()
                     if current_time - self.delete_press_time < 0.5:  # Double press within 0.5 seconds
                         self.delete_selected_element()
+                        return
                     else:
                         self.copy_selected_element()
                     self.delete_press_time = current_time
@@ -515,7 +516,7 @@ async def main():
         loop.stop()
 
     loop = asyncio.get_running_loop()
-    grid_studies = GridStudies()
+    grid_studies = GridUI()
 
     serialosc = monome.SerialOsc()
     serialosc.device_added_event.add_handler(serialosc_device_added)
