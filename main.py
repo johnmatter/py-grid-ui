@@ -9,6 +9,7 @@ import random
 import string
 import copy
 from collections import deque
+import pdb
 
 def generate_unique_id(existing_ids, length=6):
     while True:
@@ -265,6 +266,7 @@ class GridStudies(monome.GridApp):
             new_id = generate_unique_id(self.ui_elements.keys())
             self.ui_elements[new_id] = new_element
             print(f"Created new {type(new_element.shape).__name__}")
+            self.current_points.clear()  # Clear points after creating the element
         else:
             print("Cannot create UI element: it would be in the bottom row or overlap with existing elements")
 
@@ -278,7 +280,8 @@ class GridStudies(monome.GridApp):
         if len(self.current_points) < 3:
             print(f"Warning: Not enough points to create a triangle. Points: {self.current_points}")
             return None
-        return UIElement(Triangle(self.current_points), UIElementType.TOGGLE)
+
+        return UIElement(Triangle(self.current_points.copy()), UIElementType.TOGGLE)
 
     def create_point(self):
         x, y = self.current_points[0]
