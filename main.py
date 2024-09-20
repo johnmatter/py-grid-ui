@@ -10,6 +10,8 @@ import string
 import copy
 from collections import deque
 import pdb
+import rtmidi
+from rtmidi.midiconstants import (CONTROL_CHANGE, NOTE_ON, NOTE_OFF)
 
 def generate_unique_id(existing_ids, length=6):
     while True:
@@ -100,13 +102,18 @@ class UIElementType(Enum):
     SLIDER = 3
 
 class UIElement:
-    def __init__(self, id, shape):
+    next_note_number = 0
+    next_cc_number = 1  # Starting from CC 1 (Modulation Wheel)
+
+    def __init__(self, id, shape, grid_ui):
         self.id = id
         self.shape = shape
+        self.grid_ui = grid_ui
         self.state = 0
         self.flash_start = 0
-        self.base_brightness = 3
-        self.peak_brightness = 5
+        self.base_brightness = 2
+        self.peak_brightness = 9
+        self.channel = 1  # Default MIDI channel
 
     def contains_point(self, x, y):
         return self.shape.contains_point(x, y)
@@ -131,6 +138,11 @@ class UIElement:
         raise NotImplementedError("Subclasses should implement this!")
 
 class Toggle(UIElement):
+    def __init__(self, id, shape, grid_ui):
+        super().__init__(id, shape, grid_ui)
+        self.note_number = UIElement.next_note_number
+        UIElement.next_note_number += 1
+
     def get_brightness(self):
         elapsed = time.time() - self.flash_start
         if self.state:  # If the toggle is on
@@ -147,6 +159,20 @@ class Toggle(UIElement):
     def touch(self, x, y, s):
         super().touch(x,y,s)
         self.state = s
+        if s == 1:
+            self.send_note_on()
+        else:
+            self.send_note_off()
+
+    def send_note_on(self):
+        midi_message = [NOTE_ON | (self.channel - 1), self.note_number, 127]
+        self.grid_ui.midiout.send_message(midi_message)
+        print(f"MIDI Note On: Channel {self.channel}, Note {self.note_number}, Velocity 127")
+
+    def send_note_off(self):
+        midi_message = [NOTE_OFF | (self.channel - 1), self.note_number, 0]
+        self.grid_ui.midiout.send_message(midi_message)
+        print(f"MIDI Note Off: Channel {self.channel}, Note {self.note_number}, Velocity 0")
 
     def draw(self, buffer):
         self.shape.draw(
@@ -155,10 +181,29 @@ class Toggle(UIElement):
         )
 
 class Trigger(UIElement):
+    def __init__(self, id, shape, grid_ui):
+        super().__init__(id, shape, grid_ui)
+        self.note_number = UIElement.next_note_number
+        UIElement.next_note_number += 1
+
     def touch(self, x, y, s):
         super().touch(x,y,s)
         if s == 1:
-            self.state = 1 - self.state
+            self.state = 1
+            self.send_note_on()
+        else:
+            self.state = 0
+            self.send_note_off()
+
+    def send_note_on(self):
+        midi_message = [NOTE_ON | (self.channel - 1), self.note_number, 127]
+        self.grid_ui.midiout.send_message(midi_message)
+        print(f"MIDI Note On: Channel {self.channel}, Note {self.note_number}, Velocity 127")
+
+    def send_note_off(self):
+        midi_message = [NOTE_OFF | (self.channel - 1), self.note_number, 0]
+        self.grid_ui.midiout.send_message(midi_message)
+        print(f"MIDI Note Off: Channel {self.channel}, Note {self.note_number}, Velocity 0")
 
     def draw(self, buffer):
         self.shape.draw(
@@ -167,6 +212,32 @@ class Trigger(UIElement):
         )
 
 class Slider(UIElement):
+    def __init__(self, id, shape, grid_ui):
+        super().__init__(id, shape, grid_ui)
+        self.cc_number = UIElement.next_cc_number
+        UIElement.next_cc_number += 1
+        if UIElement.next_cc_number in [32, 64, 97, 120]:  # Skip reserved CC numbers
+            UIElement.next_cc_number += 1
+
+    def touch(self, x, y, s):
+        super().touch(x, y, s)
+        self.state = self.calculate_value(x, y)
+        self.send_cc()
+
+    def calculate_value(self, x, y):
+        # Calculate the value based on the touch position
+        # This is a simple linear calculation
+        start_x, start_y = self.shape.points[0]
+        end_x, end_y = self.shape.points[1]
+        total_length = max(abs(end_x - start_x), abs(end_y - start_y))
+        current_length = max(abs(x - start_x), abs(y - start_y))
+        return int((current_length / total_length) * 127)
+
+    def send_cc(self):
+        midi_message = [CONTROL_CHANGE | (self.channel - 1), self.cc_number, self.state]
+        self.grid_ui.midiout.send_message(midi_message)
+        print(f"MIDI CC: Channel {self.channel}, CC {self.cc_number}, Value {self.state}")
+
     def draw(self, buffer):
         # Slider logic: draw a line or a series of points based on the current value
         # For example, we can represent the slider's value with a line of LEDs
@@ -196,9 +267,12 @@ class GridUI(monome.GridApp):
         self.delete_press_time = 0
         self.delete_press_count = 0
         self.paste_buffer = None
-        self.meta_history = deque(maxlen=5)  # Store last 5 button presses
+        self.paste_location = None
+        self.button_history = deque(maxlen=5)  # Store last 5 button presses
         self.ui_elements = {}
         self.current_points = []
+        self.midiout = rtmidi.MidiOut()
+        self.open_midi_port()
         self.reset()
 
     def reset(self):
@@ -208,7 +282,8 @@ class GridUI(monome.GridApp):
         self.selected_element = None
         self.delete_press_time = 0
         self.delete_press_count = 0
-        self.meta_history.clear()
+        self.paste_location = None
+        self.button_history.clear()
         # We don't reset paste_buffer here to keep it across resets
 
     def on_grid_ready(self):
@@ -240,18 +315,28 @@ class GridUI(monome.GridApp):
         if self.connected:
             buffer = monome.GridBuffer(self.width, self.height)
             buffer.render(self.grid)
+        if self.midiout:
+            self.midiout.close_port()
+        del self.midiout
         print("\nCleaning up and exiting...")
 
     def on_grid_key(self, x, y, s):
+        self.button_history.append((x, y))
+        
         if not self.connected:
             return
 
         if x == 0 and y == self.height - 1:  # Meta key
+            # Set the meta key state
             self.meta_pressed = (s == 1)
+
+            # If the meta key is released, create a UI element
             if not self.meta_pressed:
                 self.create_ui_element()
                 self.selected_element = None
                 self.current_points.clear()
+
+            # Redraw the grid
             self.draw()
             return
 
@@ -266,7 +351,7 @@ class GridUI(monome.GridApp):
         if y == self.height - 1:  # Ignore bottom row
             return
 
-        print(f"{x:02d} {y:02d} {s}")
+        print(f"Normal interaction: x={x:02d}, y={y:02d}, s={s}")
 
         # Check if the point is inside any UI element
         for element_id, element in self.ui_elements.items():
@@ -277,13 +362,15 @@ class GridUI(monome.GridApp):
 
     def handle_meta_interaction(self, x, y, s):
         if s == 1:  # Key pressed
-            self.meta_history.append((x, y))
-            print(f"Meta interaction: x={x}, y={y}")
+            print(f"Meta interaction: x={x:02d}, y={y:02d}, s={s}")
             
             if y < self.height - 1:  # Exclude bottom row for UI element creation
                 if (x, y) not in self.current_points:
                     self.current_points.append((x, y))
                     print(f"Added point: {(x, y)}. Current points: {self.current_points}")
+                
+                # Set paste location
+                self.paste_location = (x, y)
             
             if self.selected_element:
                 meta_ui_pos = self.get_meta_ui_position(self.selected_element)
@@ -293,18 +380,20 @@ class GridUI(monome.GridApp):
                 elif (x, y) == (meta_ui_pos[0] + 1, meta_ui_pos[1]):
                     self.selected_element.adjust_brightness(-1)
                     return
-                elif (x, y) == (1, self.height - 1):  # Copy/Delete button
+                elif (x, y) == (1, self.height - 1):  # Copy/Delete/Paste button
                     current_time = time.time()
                     if current_time - self.delete_press_time < 0.5:  # Double press within 0.5 seconds
                         self.delete_selected_element()
                         self.current_points.clear()
-                        return
+                    elif self.paste_buffer and self.paste_location:
+                        self.paste_element(self.paste_location[0], self.paste_location[1])
+                        self.paste_location = None
                     else:
                         self.copy_selected_element()
                     self.delete_press_time = current_time
                     return
 
-            # If we didn't press a meta UI button, check for polygon selection or pasting
+            # If we didn't press a meta UI button, check for polygon selection
             if y < self.height - 1:  # Exclude bottom row
                 element_at_position = self.get_element_at_position(x, y)
                 if element_at_position:
@@ -312,8 +401,6 @@ class GridUI(monome.GridApp):
                         self.deselect_element(self.selected_element)
                     self.selected_element = element_at_position
                     self.delete_press_count = 0  # Reset delete press count when selecting a new element
-                elif self.paste_buffer and self.last_pressed_was_copy_delete():
-                    self.paste_element(x, y)
                 else:
                     if self.selected_element:
                         self.deselect_element(self.selected_element)
@@ -321,16 +408,16 @@ class GridUI(monome.GridApp):
 
     def deselect_element(self, element):
         element.reset_brightness()
-        element.state = 0  # Reset the state of the element
+        # element.state = 0  # Reset the state of the element
 
     def create_ui_element(self):
         new_id = generate_unique_id(self.ui_elements.keys())
         if len(self.current_points) == 2:
-            new_element = Trigger(new_id, Rectangle(self.current_points.copy()))
+            new_element = Trigger(new_id, Rectangle(self.current_points.copy()), self)
         elif len(self.current_points) == 3:
-            new_element = Trigger(new_id, Triangle(self.current_points.copy()))
+            new_element = Trigger(new_id, Triangle(self.current_points.copy()), self)
         elif len(self.current_points) == 1:
-            new_element = Trigger(new_id, Point(self.current_points.copy()))
+            new_element = Trigger(new_id, Point(self.current_points.copy()), self)
         else:
             print(f"Warning: Invalid number of points for UI element creation: {len(self.current_points)}")
             return
@@ -338,6 +425,10 @@ class GridUI(monome.GridApp):
         if new_element and not self.element_in_bottom_row(new_element) and not self.elements_overlap(new_element):
             self.ui_elements[new_id] = new_element
             print(f"Created new {type(new_element).__name__} {new_element.id}")
+            if isinstance(new_element, Slider):
+                print(f"Assigned CC number: {new_element.cc_number}")
+            else:
+                print(f"Assigned note number: {new_element.note_number}")
             self.current_points.clear()  # Clear points after creating the element
         else:
             print("Cannot create UI element: it would be in the bottom row or overlap with existing elements")
@@ -385,9 +476,6 @@ class GridUI(monome.GridApp):
         return ccw((x1, y1), (x3, y3), (x4, y4)) != ccw((x2, y2), (x3, y3), (x4, y4)) and \
                ccw((x1, y1), (x2, y2), (x3, y3)) != ccw((x1, y1), (x2, y2), (x4, y4))
 
-    def last_pressed_was_copy_delete(self):
-        return len(self.meta_history) >= 2 and self.meta_history[-2] == (1, self.height - 1)
-
     def copy_selected_element(self):
         if self.selected_element:
             self.paste_buffer = copy.deepcopy(self.selected_element)
@@ -426,7 +514,7 @@ class GridUI(monome.GridApp):
         new_id = generate_unique_id(self.ui_elements.keys())
         self.ui_elements[new_id] = new_element
         self.selected_element = new_element
-        print("Element pasted")
+        print(f"Element pasted at ({x}, {y})")
 
     def element_in_bottom_row(self, element):
         return any(point[1] == self.height - 1 for point in element.shape.points)
@@ -479,11 +567,24 @@ class GridUI(monome.GridApp):
             buffer.led_level_set(meta_ui_pos[0], meta_ui_pos[1], 15)  # Increment brightness
             buffer.led_level_set(meta_ui_pos[0] + 1, meta_ui_pos[1], 15)  # Decrement brightness
             
-            # Draw copy/delete button
-            copy_delete_brightness = 15 if self.paste_buffer else 8
-            buffer.led_level_set(1, self.height - 1, copy_delete_brightness)
+            # Draw copy/delete/paste button
+            copy_delete_paste_brightness = 15 if self.paste_buffer else 8
+            buffer.led_level_set(1, self.height - 1, copy_delete_paste_brightness)
+
+        # Draw paste location indicator
+        if self.meta_pressed and self.paste_buffer and self.paste_location:
+            buffer.led_level_set(self.paste_location[0], self.paste_location[1], 15)
 
         buffer.render(self.grid)
+
+    def open_midi_port(self):
+        available_ports = self.midiout.get_ports()
+        if available_ports:
+            self.midiout.open_port(0)  # Open the first available port
+            print(f"Opened MIDI port: {available_ports[0]}")
+        else:
+            self.midiout.open_virtual_port("GridUI MIDI")
+            print("Opened virtual MIDI port: GridUI MIDI")
 
 """
                  _       
